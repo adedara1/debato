@@ -1,3 +1,5 @@
+import { useWorkspaceChats } from '~/lib/hooks/useWorkspaceChats';
+import { useAuth } from '~/lib/hooks/useAuth';
 import { motion, type Variants } from 'framer-motion';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
@@ -71,22 +73,83 @@ export const Menu = () => {
   const [dialogContent, setDialogContent] = useState<DialogContent>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const profile = useStore(profileStore);
+  const { user, isAuthenticated } = useAuth();
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
+
+  const { chats: workspaceChats, isLoading: isLoadingWorkspaceChats } = useWorkspaceChats();
+
+  // Use auth user data if available, otherwise fall back to profile
+  const displayName = user?.display_name || user?.username || profile?.username || 'Guest User';
+  const email = user?.email || '';
 
   const { filteredItems: filteredList, handleSearchChange } = useSearchFilter({
     items: list,
     searchFields: ['description'],
   });
 
-  const loadEntries = useCallback(() => {
+  const loadEntries = useCallback(async () => {
+    const allChats: ChatHistoryItem[] = [];
+
+    // Load from IndexedDB
     if (db) {
-      getAll(db)
-        .then((list) => list.filter((item) => item.urlId && item.description))
-        .then(setList)
-        .catch((error) => toast.error(error.message));
+      try {
+        const localChats = await getAll(db);
+        allChats.push(...localChats.filter((item) => item.urlId && item.description));
+      } catch (error) {
+        console.error('Failed to load chats from IndexedDB:', error);
+        toast.error('Failed to load local chats');
+      }
     }
-  }, []);
+
+    // Load from Supabase workspace chats (if authenticated)
+    if (isAuthenticated && workspaceChats.length > 0) {
+      /*
+       * Convert workspace chats to ChatHistoryItem format
+       * Note: chat.id is bigint from Supabase, convert to string
+       */
+      const supabaseChats: ChatHistoryItem[] = workspaceChats.map((chat) => ({
+        id: String(chat.id), // Convert bigint to string
+        urlId: String(chat.id),
+        description: chat.description,
+        messages: chat.messages,
+        timestamp: chat.timestamp,
+        metadata: chat.metadata,
+      }));
+
+      // Merge with local chats, avoiding duplicates
+      const existingIds = new Set(allChats.map((c) => c.id));
+      supabaseChats.forEach((chat) => {
+        if (!existingIds.has(chat.id)) {
+          allChats.push(chat);
+        } else {
+          // Update existing chat with Supabase data (more recent)
+          const index = allChats.findIndex((c) => c.id === chat.id);
+
+          if (index >= 0) {
+            allChats[index] = chat;
+          }
+        }
+      });
+    }
+
+    // Sort by timestamp (most recent first)
+    allChats.sort((a, b) => {
+      const timeA = new Date(a.timestamp).getTime();
+      const timeB = new Date(b.timestamp).getTime();
+
+      return timeB - timeA;
+    });
+
+    setList(allChats);
+  }, [db, isAuthenticated, workspaceChats]);
+
+  // Reload when workspace chats change
+  useEffect(() => {
+    if (!isLoadingWorkspaceChats) {
+      loadEntries();
+    }
+  }, [workspaceChats, isLoadingWorkspaceChats, loadEntries]);
 
   const deleteChat = useCallback(
     async (id: string): Promise<void> => {
@@ -341,18 +404,27 @@ export const Menu = () => {
           <div className="text-gray-900 dark:text-white font-medium"></div>
           <div className="flex items-center gap-3">
             <HelpButton onClick={() => window.open('https://stackblitz-labs.github.io/bolt.diy/', '_blank')} />
-            <span className="font-medium text-sm text-gray-900 dark:text-white truncate">
-              {profile?.username || 'Guest User'}
-            </span>
+            <div className="flex flex-col items-end min-w-0 flex-1">
+              <span className="font-medium text-sm text-gray-900 dark:text-white truncate w-full text-right">
+                {displayName}
+              </span>
+              {email && (
+                <span className="text-xs text-gray-500 dark:text-gray-400 truncate w-full text-right">{email}</span>
+              )}
+            </div>
             <div className="flex items-center justify-center w-[32px] h-[32px] overflow-hidden bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-500 rounded-full shrink-0">
               {profile?.avatar ? (
                 <img
                   src={profile.avatar}
-                  alt={profile?.username || 'User'}
+                  alt={displayName}
                   className="w-full h-full object-cover"
                   loading="eager"
                   decoding="sync"
                 />
+              ) : isAuthenticated && user ? (
+                <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                  {displayName[0]?.toUpperCase() || 'U'}
+                </span>
               ) : (
                 <div className="i-ph:user-fill text-lg" />
               )}
